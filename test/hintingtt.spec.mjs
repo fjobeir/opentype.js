@@ -307,7 +307,7 @@ describe('hintingtt.mjs - CVE: TrueType Hinting VM Infinite Loop', function() {
 
     it('should not hang on LOOPCALL with huge count', function() {
         // Define function 0 as empty (FDEF 0 ... ENDF)
-        // Then LOOPCALL function 0 with count = 0x7FFFFFFF (2^31 - 1)
+        // Then LOOPCALL function 0 with count = 0x7FFF (32767)
         const fpgm = [
             // PUSHB[0] 0 - function number for FDEF
             0xB0, 0x00,
@@ -327,12 +327,9 @@ describe('hintingtt.mjs - CVE: TrueType Hinting VM Infinite Loop', function() {
         const buffer = buildMinimalTTF(fpgm);
         const font = parse(buffer);
 
-        // Should complete quickly because LOOPCALL count is capped
-        // The capped count (10000) * empty function should still complete fast
-        // but won't hang with the original 32767 or higher values
-        assert.doesNotThrow(() => {
-            font.hinting.exec(font.glyphs.get(0), 12);
-        });
+        // Should complete quickly because LOOPCALL count is capped to 10000
+        font.hinting.exec(font.glyphs.get(0), 12);
+        assert.ok(!font.hinting._errorState, 'should complete without setting an error state');
     });
 
     it('should not hang on recursive CALL (infinite recursion)', function() {
@@ -392,9 +389,9 @@ describe('hintingtt.mjs - CVE: TrueType Hinting VM Infinite Loop', function() {
     });
 
     it('should cap SLOOP to prevent excessive iterations', function() {
-        // Set loop to a huge value then use an instruction that uses it
-        // PUSHW[0] 0x7FFF (32767), SLOOP
-        // This should be capped to MAX_LOOP_COUNT (10000)
+        // Set loop to a huge value (32767) via SLOOP, then execute normally.
+        // SLOOP should cap the value to MAX_LOOP_COUNT (10000).
+        // The fpgm completes without error because SLOOP just sets state.loop.
         const fpgm = [
             0xB8,             // PUSHW[0]
             0x7F, 0xFF,       // 32767
@@ -404,10 +401,8 @@ describe('hintingtt.mjs - CVE: TrueType Hinting VM Infinite Loop', function() {
         const buffer = buildMinimalTTF(fpgm);
         const font = parse(buffer);
 
-        // Should not throw - SLOOP just caps the value
-        assert.doesNotThrow(() => {
-            font.hinting.exec(font.glyphs.get(0), 12);
-        });
+        font.hinting.exec(font.glyphs.get(0), 12);
+        assert.ok(!font.hinting._errorState, 'should complete without setting an error state');
     });
 
     it('should still allow legitimate font hinting', function() {
