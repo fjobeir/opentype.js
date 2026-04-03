@@ -17,212 +17,15 @@
 import { writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import {
+    u16, u32, i16, pad,
+    makeHead, makeHhea, makeMaxp, makeOS2, makeName, makeHmtx, makeCmap, makePost,
+    assembleFont,
+} from './font-generation-helpers.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// --- helpers ---
-
-function u16(v) { return [(v >> 8) & 0xff, v & 0xff]; }
-function u32(v) { return [(v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff]; }
-function i16(v) { return u16(v < 0 ? v + 0x10000 : v); }
-function i64(v) { return [...u32(0), ...u32(v)]; } // simplified LONGDATETIME
-function tag(s) { return [...s].map(c => c.charCodeAt(0)); }
-function pad(arr) { while (arr.length % 4 !== 0) arr.push(0); return arr; }
-
-function calcChecksum(bytes) {
-    const padded = [...bytes];
-    while (padded.length % 4 !== 0) padded.push(0);
-    let sum = 0;
-    for (let i = 0; i < padded.length; i += 4) {
-        sum = (sum + ((padded[i] << 24) | (padded[i+1] << 16) | (padded[i+2] << 8) | padded[i+3])) >>> 0;
-    }
-    return sum;
-}
-
-// --- table builders ---
-
-function makeHead() {
-    return [
-        ...u16(1), ...u16(0),          // majorVersion, minorVersion
-        ...u16(1), ...u16(0),          // fontRevision (fixed 1.0)
-        ...u32(0),                      // checksumAdjustment (filled later)
-        ...u32(0x5F0F3CF5),            // magicNumber
-        ...u16(0x000B),                // flags
-        ...u16(1000),                  // unitsPerEm
-        ...i64(0),                      // created
-        ...i64(0),                      // modified
-        ...i16(0), ...i16(0),          // xMin, yMin
-        ...i16(1000), ...i16(1000),    // xMax, yMax
-        ...u16(0),                      // macStyle
-        ...u16(8),                      // lowestRecPPEM
-        ...i16(2),                      // fontDirectionHint
-        ...i16(1),                      // indexToLocFormat (long)
-        ...i16(0),                      // glyphDataFormat
-    ];
-}
-
-function makeHhea(numGlyphs) {
-    return [
-        ...u16(1), ...u16(0),          // majorVersion, minorVersion
-        ...i16(800),                    // ascender
-        ...i16(-200),                  // descender
-        ...i16(0),                      // lineGap
-        ...u16(1000),                  // advanceWidthMax
-        ...i16(0),                      // minLeftSideBearing
-        ...i16(0),                      // minRightSideBearing
-        ...i16(1000),                  // xMaxExtent
-        ...i16(1), ...i16(0),          // caretSlopeRise, caretSlopeRun
-        ...i16(0),                      // caretOffset
-        ...i16(0), ...i16(0), ...i16(0), ...i16(0), // reserved
-        ...i16(0),                      // metricDataFormat
-        ...u16(numGlyphs),            // numberOfHMetrics
-    ];
-}
-
-function makeMaxp(numGlyphs) {
-    return [
-        ...u16(1), ...u16(0),          // version 1.0
-        ...u16(numGlyphs),            // numGlyphs
-        ...u16(0),                      // maxPoints
-        ...u16(0),                      // maxContours
-        ...u16(0),                      // maxCompositePoints
-        ...u16(2),                      // maxCompositeContours
-        ...u16(1),                      // maxZones
-        ...u16(0),                      // maxTwilightPoints
-        ...u16(0),                      // maxStorage
-        ...u16(0),                      // maxFunctionDefs
-        ...u16(0),                      // maxInstructionDefs
-        ...u16(0),                      // maxStackElements
-        ...u16(0),                      // maxSizeOfInstructions
-        ...u16(2),                      // maxComponentElements
-        ...u16(2),                      // maxComponentDepth
-    ];
-}
-
-function makeOs2() {
-    const os2 = new Array(96).fill(0);
-    // version
-    os2[0] = 0; os2[1] = 4;
-    // xAvgCharWidth
-    os2[2] = (500 >> 8) & 0xff; os2[3] = 500 & 0xff;
-    // usWeightClass = 400
-    os2[4] = (400 >> 8) & 0xff; os2[5] = 400 & 0xff;
-    // usWidthClass = 5
-    os2[6] = 0; os2[7] = 5;
-    // sTypoAscender at offset 68
-    os2[68] = (800 >> 8) & 0xff; os2[69] = 800 & 0xff;
-    // sTypoDescender at offset 70 (-200 = 0xFF38)
-    os2[70] = 0xFF; os2[71] = 0x38;
-    // sTypoLineGap at offset 72
-    os2[72] = 0; os2[73] = 0;
-    // usWinAscent at offset 74
-    os2[74] = (800 >> 8) & 0xff; os2[75] = 800 & 0xff;
-    // usWinDescent at offset 76
-    os2[76] = (200 >> 8) & 0xff; os2[77] = 200 & 0xff;
-    // ulUnicodeRange1 bit 0 (Basic Latin) at offset 42
-    os2[42] = 0; os2[43] = 0; os2[44] = 0; os2[45] = 1;
-    // sxHeight at offset 86
-    os2[86] = (500 >> 8) & 0xff; os2[87] = 500 & 0xff;
-    // sCapHeight at offset 88
-    os2[88] = (700 >> 8) & 0xff; os2[89] = 700 & 0xff;
-    return os2;
-}
-
-function makeHmtx(numGlyphs) {
-    const metrics = [];
-    for (let i = 0; i < numGlyphs; i++) {
-        metrics.push(...u16(500), ...i16(0)); // advanceWidth, lsb
-    }
-    return metrics;
-}
-
-function makeCmap() {
-    // Format 4 subtable mapping U+0041 ('A') → glyph 1
-    const segCount = 2; // 1 segment + sentinel
-    const searchRange = 2 * Math.pow(2, Math.floor(Math.log2(segCount)));
-    const entrySelector = Math.floor(Math.log2(segCount));
-    const rangeShift = 2 * segCount - searchRange;
-
-    const subtable = [
-        ...u16(4),                          // format
-        ...u16(24),                         // length of this subtable
-        ...u16(0),                          // language
-        ...u16(segCount * 2),              // segCountX2
-        ...u16(searchRange),
-        ...u16(entrySelector),
-        ...u16(rangeShift),
-        ...u16(0x0041), ...u16(0xFFFF),    // endCode[]: 'A', sentinel
-        ...u16(0),                          // reservedPad
-        ...u16(0x0041), ...u16(0xFFFF),    // startCode[]: 'A', sentinel
-        ...i16(0),      ...i16(1),         // idDelta[]: patched below for 'A' and sentinel
-        ...u16(0),      ...u16(0),         // idRangeOffset[]: 0, 0
-    ];
-    // Fix idDelta: to map 0x41 → glyph 1, delta = 1 - 0x41 = -0x40 = 0xFFC0
-    subtable[24] = 0xFF; subtable[25] = 0xC0;
-    // Sentinel delta keeps 0xFFFF mapping to glyph 0
-    subtable[26] = 0x00; subtable[27] = 0x01;
-    // Update length
-    const len = subtable.length;
-    subtable[2] = (len >> 8) & 0xff; subtable[3] = len & 0xff;
-
-    return [
-        ...u16(0),          // version
-        ...u16(1),          // numTables
-        ...u16(3),          // platformID (Windows)
-        ...u16(1),          // encodingID (Unicode BMP)
-        ...u32(12),         // offset to subtable
-        ...subtable,
-    ];
-}
-
-function makePost() {
-    return [
-        ...u16(3), ...u16(0),  // version 3.0 (no glyph names)
-        ...u32(0),              // italicAngle
-        ...i16(-100),          // underlinePosition
-        ...i16(50),            // underlineThickness
-        ...u32(0),              // isFixedPitch
-        ...u32(0),              // minMemType42
-        ...u32(0),              // maxMemType42
-        ...u32(0),              // minMemType1
-        ...u32(0),              // maxMemType1
-    ];
-}
-
-function makeName() {
-    const names = [
-        [0, 'Copyright'],
-        [1, 'CircularTest'],
-        [2, 'Regular'],
-        [4, 'CircularTest Regular'],
-        [5, 'Version 1.0'],
-        [6, 'CircularTest-Regular'],
-    ];
-    const stringData = [];
-    const records = [];
-    let offset = 0;
-    for (const [nameID, str] of names) {
-        const encoded = [...str].flatMap(c => u16(c.charCodeAt(0)));
-        records.push([
-            ...u16(3),          // platformID (Windows)
-            ...u16(1),          // encodingID (Unicode BMP)
-            ...u16(0x0409),     // languageID (English US)
-            ...u16(nameID),
-            ...u16(encoded.length),
-            ...u16(offset),
-        ]);
-        stringData.push(...encoded);
-        offset += encoded.length;
-    }
-    const storageOffset = 6 + records.length * 12;
-    return [
-        ...u16(0),                      // format
-        ...u16(names.length),           // count
-        ...u16(storageOffset),          // stringOffset
-        ...records.flat(),
-        ...stringData,
-    ];
-}
+// --- glyph data (the interesting part of this font) ---
 
 function makeGlyf() {
     // Glyph 0: .notdef — simple empty glyph (0 contours)
@@ -253,11 +56,6 @@ function makeGlyf() {
     return { glyph0, glyph1, glyph2 };
 }
 
-function makeLoca(offsets) {
-    // Long format (indexToLocFormat = 1)
-    return offsets.flatMap(o => u32(o));
-}
-
 // --- assemble font ---
 
 function buildFont() {
@@ -269,62 +67,23 @@ function buildFont() {
     const g2 = pad([...glyph2]);
 
     const glyfData = [...g0, ...g1, ...g2];
-    const locaData = makeLoca([0, g0.length, g0.length + g1.length, g0.length + g1.length + g2.length]);
+    // Long loca format (indexToLocFormat = 1)
+    const locaData = [0, g0.length, g0.length + g1.length, g0.length + g1.length + g2.length]
+        .flatMap(o => u32(o));
 
     const numGlyphs = 3;
-    const tables = {
-        'head': makeHead(),
+    return assembleFont({
+        'head': makeHead({ indexToLocFormat: 1 }),
         'hhea': makeHhea(numGlyphs),
         'maxp': makeMaxp(numGlyphs),
-        'OS/2': makeOs2(),
+        'OS/2': makeOS2(),
         'hmtx': makeHmtx(numGlyphs),
-        'cmap': makeCmap(),
+        'cmap': makeCmap(0x0041),  // 'A' → glyph 1
         'loca': locaData,
         'glyf': glyfData,
-        'name': makeName(),
+        'name': makeName('CircularTest'),
         'post': makePost(),
-    };
-
-    const tags = Object.keys(tables).sort();
-    const numTables = tags.length;
-    const searchRange = Math.pow(2, Math.floor(Math.log2(numTables))) * 16;
-    const entrySelector = Math.floor(Math.log2(numTables));
-    const rangeShift = numTables * 16 - searchRange;
-
-    // Offset table (12 bytes) + table records (numTables * 16 bytes)
-    const headerSize = 12 + numTables * 16;
-    let dataOffset = headerSize;
-
-    // Build table records and collect padded table data
-    const tableRecords = [];
-    const tableData = [];
-    for (const t of tags) {
-        const data = tables[t];
-        const paddedData = pad([...data]);
-        tableRecords.push([
-            ...tag(t),
-            ...u32(calcChecksum(data)),
-            ...u32(dataOffset),
-            ...u32(data.length),
-        ]);
-        tableData.push(...paddedData);
-        dataOffset += paddedData.length;
-    }
-
-    const font = [
-        // Offset table
-        ...u32(0x00010000),         // sfVersion (TrueType)
-        ...u16(numTables),
-        ...u16(searchRange),
-        ...u16(entrySelector),
-        ...u16(rangeShift),
-        // Table records
-        ...tableRecords.flat(),
-        // Table data
-        ...tableData,
-    ];
-
-    return new Uint8Array(font);
+    });
 }
 
 const fontBytes = buildFont();
