@@ -28,9 +28,9 @@
 import glyf from './tables/glyf.mjs';
 
 // Safety limits to prevent denial-of-service from crafted fonts.
-const MAX_INSTRUCTIONS = 1_000_000;   // max instructions per hinting session
-const MAX_CALL_DEPTH = 64;            // max nested CALL/LOOPCALL depth
-const MAX_LOOP_COUNT = 10_000;        // max LOOPCALL iterations & SLOOP value
+const MAX_INSTRUCTIONS = 1000000;   // max instructions per hinting session
+const MAX_CALL_DEPTH = 64;          // max nested CALL/LOOPCALL depth
+const MAX_LOOP_COUNT = 10000;       // max LOOPCALL iterations & SLOOP value
 
 /*
 * turn on for intensive debugging.
