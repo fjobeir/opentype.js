@@ -18,58 +18,11 @@
 import { writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { u16, u32, i16, tag, makeHead, makePost, assembleFont } from './font-generation-helpers.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// --- helpers ---
-
-function u16(v) { return [(v >> 8) & 0xff, v & 0xff]; }
-function u32(v) { return [(v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff]; }
-function i16(v) { return u16(v < 0 ? v + 0x10000 : v); }
-function i64(v) { return [...u32(0), ...u32(v)]; }
-function tag(s) { return [...s].map(c => c.charCodeAt(0)); }
-function pad(arr) { while (arr.length % 4 !== 0) arr.push(0); return arr; }
-
-function calcChecksum(bytes) {
-    const padded = [...bytes];
-    while (padded.length % 4 !== 0) padded.push(0);
-    let sum = 0;
-    for (let i = 0; i < padded.length; i += 4) {
-        sum = (sum + ((padded[i] << 24) | (padded[i+1] << 16) | (padded[i+2] << 8) | padded[i+3])) >>> 0;
-    }
-    return sum;
-}
-
-function encodeUTF16BE(str) {
-    const result = [];
-    for (let i = 0; i < str.length; i++) {
-        result.push((str.charCodeAt(i) >> 8) & 0xFF);
-        result.push(str.charCodeAt(i) & 0xFF);
-    }
-    return result;
-}
-
 // --- table builders ---
-
-function makeHead() {
-    return [
-        ...u16(1), ...u16(0),          // majorVersion, minorVersion
-        ...u16(1), ...u16(0),          // fontRevision (fixed 1.0)
-        ...u32(0),                      // checksumAdjustment (filled later)
-        ...u32(0x5F0F3CF5),            // magicNumber
-        ...u16(0x000B),                // flags
-        ...u16(1000),                  // unitsPerEm
-        ...i64(0),                      // created
-        ...i64(0),                      // modified
-        ...i16(0), ...i16(0),          // xMin, yMin
-        ...i16(1000), ...i16(1000),    // xMax, yMax
-        ...u16(0),                      // macStyle
-        ...u16(8),                      // lowestRecPPEM
-        ...i16(2),                      // fontDirectionHint
-        ...i16(0),                      // indexToLocFormat (short)
-        ...i16(0),                      // glyphDataFormat
-    ];
-}
 
 function makeHhea() {
     return [
@@ -132,8 +85,17 @@ function makeOS2() {
 }
 
 function makeName(familyName) {
-    const family = encodeUTF16BE(familyName);
-    const style = encodeUTF16BE('Regular');
+    const family = [];
+    for (let i = 0; i < familyName.length; i++) {
+        family.push((familyName.charCodeAt(i) >> 8) & 0xFF);
+        family.push(familyName.charCodeAt(i) & 0xFF);
+    }
+    const styleStr = 'Regular';
+    const style = [];
+    for (let i = 0; i < styleStr.length; i++) {
+        style.push((styleStr.charCodeAt(i) >> 8) & 0xFF);
+        style.push(styleStr.charCodeAt(i) & 0xFF);
+    }
     const records = [
         { nameID: 1, data: family },
         { nameID: 2, data: style },
@@ -176,18 +138,6 @@ function makeCmap() {
     ];
 }
 
-function makePost() {
-    return [
-        ...u16(3), ...u16(0),          // format 3.0
-        ...u32(0),                      // italicAngle
-        ...i16(-512),                   // underlinePosition
-        ...i16(80),                     // underlineThickness
-        ...u32(0),                      // isFixedPitch
-        ...u32(0), ...u32(0),          // minMemType42, maxMemType42
-        ...u32(0), ...u32(0),          // minMemType1, maxMemType1
-    ];
-}
-
 function makeLoca() {
     // Short format, 1 glyph: offset 0, end 0 (empty)
     return [...u16(0), ...u16(0)];
@@ -207,48 +157,14 @@ function buildFont(familyName, fpgmInstructions) {
         'OS/2': makeOS2(),
         'name': makeName(familyName),
         'cmap': makeCmap(),
-        'post': makePost(),
+        'post': makePost({ underlinePosition: -512, underlineThickness: 80 }),
         'loca': makeLoca(),
         'glyf': [],  // empty — glyph 0 has zero length per loca
         'hmtx': makeHmtx(),
         'fpgm': [...fpgmInstructions],
     };
 
-    const tags = Object.keys(tables).sort();
-    const numTables = tags.length;
-    const searchRange = Math.pow(2, Math.floor(Math.log2(numTables))) * 16;
-    const entrySelector = Math.floor(Math.log2(numTables));
-    const rangeShift = numTables * 16 - searchRange;
-
-    const headerSize = 12 + numTables * 16;
-    let dataOffset = headerSize;
-
-    const tableRecords = [];
-    const tableData = [];
-    for (const t of tags) {
-        const data = tables[t];
-        const paddedData = pad([...data]);
-        tableRecords.push([
-            ...tag(t.padEnd(4, ' ')),
-            ...u32(calcChecksum(data)),
-            ...u32(dataOffset),
-            ...u32(data.length),
-        ]);
-        tableData.push(...paddedData);
-        dataOffset += paddedData.length;
-    }
-
-    const font = [
-        ...u32(0x00010000),         // sfVersion (TrueType)
-        ...u16(numTables),
-        ...u16(searchRange),
-        ...u16(entrySelector),
-        ...u16(rangeShift),
-        ...tableRecords.flat(),
-        ...tableData,
-    ];
-
-    return new Uint8Array(font);
+    return assembleFont(tables);
 }
 
 // --- POC font definitions ---
